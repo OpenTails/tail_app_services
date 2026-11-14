@@ -168,6 +168,11 @@ docker run --rm -p 3000:3000 --env-file .env tailcompany-wp-proxy
 `.env` is not baked into the image; pass it at runtime with `--env-file` (or
 `-e SENTRY_DSN=...`).
 
+CI (`.github/workflows/docker.yml`) builds the image on every push and pull
+request, and publishes it to `ghcr.io/opentails/tail_app_services` on pushes to
+`master` and `v*` tags. Dependabot (`.github/dependabot.yml`) keeps Cargo,
+GitHub Actions, and Docker base images up to date.
+
 ## Layout
 
 | File | Role |
