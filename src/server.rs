@@ -2,9 +2,9 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cache::ProductCache;
 use crate::config::Config;
@@ -22,6 +22,16 @@ pub struct App {
 struct Request {
     method: String,
     target: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 struct Response {
@@ -38,11 +48,12 @@ pub fn run(listener: TcpListener, app: Arc<App>) -> io::Result<()> {
                 let app = Arc::clone(&app);
                 thread::spawn(move || {
                     if let Err(err) = handle(stream, &app) {
-                        eprintln!("[proxy] connection error: {err}");
+                        let error: &dyn std::error::Error = &err;
+                        tracing::error!(error, "connection error");
                     }
                 });
             }
-            Err(err) => eprintln!("[proxy] accept error: {err}"),
+            Err(err) => tracing::warn!(error = %err, "accept error"),
         }
     }
     Ok(())
@@ -55,8 +66,41 @@ fn handle(mut stream: TcpStream, app: &App) -> io::Result<()> {
     let Some(request) = read_request(&mut stream)? else {
         return Ok(());
     };
+
+    let (path, query) = split_target(&request.target);
+    let sentry_trace = request.header("sentry-trace").unwrap_or_default();
+    let span = tracing::info_span!(
+        "http.request",
+        sentry.name = %format!("{} {}", request.method, path),
+        sentry.op = "http.server",
+        sentry.trace = sentry_trace,
+        http.method = %request.method,
+        http.target = %path,
+        http.response.status_code = tracing::field::Empty,
+        cache.source = tracing::field::Empty,
+    );
+    let _entered = span.enter();
+
+    attach_request_context(&request, path, query);
+
+    let started = Instant::now();
     let response = route(app, &request);
-    write_response(&mut stream, &request.method, &response)
+    span.record("http.response.status_code", response.status as i64);
+    let result = write_response(&mut stream, &request.method, &response);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    sentry::metrics::counter("http.requests", 1.0)
+        .attribute("http.method", request.method.clone())
+        .attribute("http.route", path.to_string())
+        .attribute("http.response.status_code", response.status as i64)
+        .capture();
+    sentry::metrics::distribution("http.request.duration", elapsed_ms)
+        .unit(sentry::protocol::Unit::Millisecond)
+        .attribute("http.method", request.method.clone())
+        .attribute("http.route", path.to_string())
+        .capture();
+
+    result
 }
 
 fn route(app: &App, request: &Request) -> Response {
@@ -104,8 +148,24 @@ fn products(app: &App, query: &str) -> Response {
         }
     };
 
-    match app.cache.get_or_load(|| fetch_products(&app.agent, &app.config)) {
+    match app
+        .cache
+        .get_or_load(|| fetch_products(&app.agent, &app.config))
+    {
         Ok((products, source)) => {
+            tracing::Span::current().record("cache.source", source.as_str());
+            sentry::configure_scope(|scope| scope.set_tag("cache.source", source.as_str()));
+            tracing::info!(
+                cache.source = source.as_str(),
+                cache.products = products.len(),
+                "cache lookup"
+            );
+
+            sentry::metrics::counter("cache.requests", 1.0)
+                .attribute("cache.source", source.as_str())
+                .capture();
+            sentry::metrics::gauge("cache.products", products.len() as f64).capture();
+
             let selection = select_products(&products, count, &mut Rng::from_entropy());
             Response {
                 status: 200,
@@ -114,7 +174,8 @@ fn products(app: &App, query: &str) -> Response {
             }
         }
         Err(err) => {
-            eprintln!("[proxy] upstream failure: {err}");
+            let error: &dyn std::error::Error = &err;
+            tracing::error!(error, "upstream request failed");
             Response::json(502, json!({ "error": "upstream_unavailable" }))
         }
     }
@@ -183,13 +244,56 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     }
 
     let text = String::from_utf8_lossy(&buffer);
-    let request_line = text.split("\r\n").next().unwrap_or_default();
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_uppercase();
+    let target = parts.next().unwrap_or("/").to_string();
+
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
 
     Ok(Some(Request {
-        method: parts.next().unwrap_or_default().to_uppercase(),
-        target: parts.next().unwrap_or("/").to_string(),
+        method,
+        target,
+        headers,
     }))
+}
+
+/// Attach HTTP request data and tags to the current Sentry scope so error
+/// events carry the request that produced them.
+fn attach_request_context(request: &Request, path: &str, query: &str) {
+    let host = request.header("host").unwrap_or("localhost");
+    let mut context = sentry::protocol::Request {
+        url: format!("http://{host}{}", request.target).parse().ok(),
+        method: Some(request.method.clone()),
+        query_string: if query.is_empty() {
+            None
+        } else {
+            Some(query.to_string())
+        },
+        ..Default::default()
+    };
+    for name in ["host", "user-agent", "accept", "content-type"] {
+        if let Some(value) = request.header(name) {
+            context.headers.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    sentry::configure_scope(|scope| {
+        scope.set_tag("http.method", &request.method);
+        scope.set_tag("http.route", path);
+        if let Some(span) = scope.get_span() {
+            span.set_request(context);
+        }
+    });
 }
 
 fn write_response(stream: &mut TcpStream, method: &str, response: &Response) -> io::Result<()> {
@@ -248,6 +352,12 @@ mod tests {
             cache_max_stale: Duration::from_secs(3600),
             default_count: 10,
             max_count: 100,
+            sentry_dsn: None,
+            sentry_environment: "test".to_string(),
+            sentry_release: "test".to_string(),
+            sentry_traces_sample_rate: 0.0,
+            sentry_sample_rate: 1.0,
+            sentry_debug: false,
         }
     }
 
@@ -307,11 +417,23 @@ mod tests {
         let items: Vec<Value> = serde_json::from_str(&body).unwrap();
         assert_eq!(items.len(), 10);
         for item in &items {
-            let mut keys: Vec<&str> = item.as_object().unwrap().keys().map(String::as_str).collect();
+            let mut keys: Vec<&str> = item
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
             keys.sort_unstable();
             assert_eq!(
                 keys,
-                vec!["id", "is_in_stock", "name", "on_sale", "permalink", "thumbnail"]
+                vec![
+                    "id",
+                    "is_in_stock",
+                    "name",
+                    "on_sale",
+                    "permalink",
+                    "thumbnail"
+                ]
             );
         }
     }
@@ -326,7 +448,10 @@ mod tests {
             .iter()
             .map(|item| item["on_sale"].as_bool().unwrap())
             .collect();
-        assert_eq!(flags, vec![true, true, true, true, true, false, false, false]);
+        assert_eq!(
+            flags,
+            vec![true, true, true, true, true, false, false, false]
+        );
     }
 
     #[test]
@@ -334,7 +459,14 @@ mod tests {
         let base = spawn(test_config());
 
         let (_, _, body) = get(&format!("{base}/products?count=3"));
-        assert_eq!(serde_json::from_str::<Value>(&body).unwrap().as_array().unwrap().len(), 3);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
 
         let request = ureq::get(format!("{base}/products?count=0")).call();
         let status = match request {

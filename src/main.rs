@@ -4,6 +4,7 @@ mod product;
 mod rng;
 mod select;
 mod server;
+mod telemetry;
 mod upstream;
 
 use std::net::TcpListener;
@@ -12,6 +13,9 @@ use std::sync::Arc;
 use config::Config;
 
 fn main() {
+    // Load `.env` if present. Real environment variables take precedence.
+    let _ = dotenvy::dotenv();
+
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(message) => {
@@ -19,6 +23,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Keep the guard alive for the whole process so buffered events flush on exit.
+    let _sentry_guard = telemetry::init(&config);
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(config.upstream_timeout))
@@ -35,7 +42,7 @@ fn main() {
     let listener = match TcpListener::bind(&address) {
         Ok(listener) => listener,
         Err(err) => {
-            eprintln!("failed to bind {address}: {err}");
+            tracing::error!(error = %err, "failed to bind {}", address);
             std::process::exit(1);
         }
     };
@@ -45,20 +52,17 @@ fn main() {
         .map(|addr| addr.to_string())
         .unwrap_or(address);
 
-    println!("tailcompany-wp-proxy listening on http://{local}");
-    println!("  upstream:   {}", config.upstream_url);
-    println!(
-        "  cache:      TTL {}ms, stale-if-error {}ms",
-        config.cache_ttl.as_millis(),
-        config.cache_max_stale.as_millis()
-    );
-    println!(
-        "  selection:  {} products, on-sale items first",
-        config.default_count
+    tracing::info!(
+        address = %local,
+        upstream = %config.upstream_url,
+        cache_ttl_ms = config.cache_ttl.as_millis() as u64,
+        cache_max_stale_ms = config.cache_max_stale.as_millis() as u64,
+        default_count = config.default_count,
+        "tailcompany-wp-proxy listening"
     );
 
     if let Err(err) = server::run(listener, app) {
-        eprintln!("server error: {err}");
+        tracing::error!(error = %err, "server error");
         std::process::exit(1);
     }
 }

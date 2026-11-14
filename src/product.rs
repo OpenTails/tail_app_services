@@ -26,7 +26,10 @@ fn normalize(value: Value) -> Option<Product> {
     let id = value.get("id")?.as_u64()?;
     let name = value.get("name")?.as_str()?.to_string();
 
-    let on_sale = value.get("on_sale").and_then(Value::as_bool).unwrap_or(false);
+    let on_sale = value
+        .get("on_sale")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let is_in_stock = value
         .get("is_in_stock")
         .and_then(Value::as_bool)

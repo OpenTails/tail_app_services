@@ -1,17 +1,18 @@
 # tailcompany-wp-proxy
 
 A small Rust proxy in front of the Tail Company WooCommerce Store API. It
-compiles to a single self-contained binary and provides an in-memory TTL cache,
-so upstream is not hit on every request.
+compiles to a single self-contained binary, caches the upstream list in memory,
+and reports errors and performance traces to Sentry.
 
 - Upstream: `https://thetailcompany.com/wp-json/wc/store/v1/products?tag=select&per_page=100`
 - Endpoint: `GET /products` → JSON array of 10 products (configurable)
 - On-sale products are always listed first
 - Only the fields needed by a storefront widget are exposed
+- Sentry error reporting + tracing, and a distroless Docker image
 
 ## Requirements
 
-A Rust toolchain (build/test). The runtime needs nothing beyond the binary.
+A Rust toolchain to build/test. The runtime needs nothing beyond the binary.
 
 ## Build
 
@@ -20,10 +21,20 @@ cargo build --release
 # binary: target/release/tailcompany-wp-proxy  (~2.2 MB, stripped)
 ```
 
+Or build the container:
+
+```bash
+docker build -t tailcompany-wp-proxy .
+```
+
 ## Run
 
 ```bash
 PORT=3000 ./target/release/tailcompany-wp-proxy
+```
+
+```bash
+docker run --rm -p 3000:3000 tailcompany-wp-proxy
 ```
 
 ```bash
@@ -70,10 +81,13 @@ GET /products ──▶ TTL cache ──(miss)──▶ Store API ──▶ norm
    products always occupy the leading positions and regular products only make up
    the balance when there are not enough sale items. Results are unique and
    freshly randomized per request.
+4. **Telemetry** (`src/telemetry.rs`) — Sentry is initialised at startup and a
+   `tracing` subscriber fans events out to the console and to Sentry.
 
 ## Configuration
 
-All settings are environment variables.
+All settings are environment variables. A `.env` file in the working directory
+is loaded at startup; real environment variables take precedence.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -84,17 +98,83 @@ All settings are environment variables.
 | `CACHE_MAX_STALE_MS` | `86400000` | How long an expired list may be served when upstream is down (24 h). |
 | `DEFAULT_COUNT` | `10` | Products returned when `?count=` is omitted. |
 | `MAX_COUNT` | `100` | Upper bound for `?count=`. |
+| `SENTRY_DSN` | unset (Sentry disabled) | Sentry DSN, usually set in `.env`. |
+| `SENTRY_ENVIRONMENT` | `production` | Sentry environment tag. |
+| `SENTRY_RELEASE` | `tailcompany-wp-proxy@<version>` | Sentry release name. |
+| `SENTRY_SAMPLE_RATE` | `1.0` | Fraction of error events sent, `0.0`–`1.0`. |
+| `SENTRY_TRACES_SAMPLE_RATE` | `1.0` | Fraction of requests traced, `0.0`–`1.0` (`/health` is never traced). |
+| `SENTRY_DEBUG` | `false` | Log Sentry transport activity to stderr. |
+| `RUST_LOG` | `info` | Console log filter (e.g. `debug`, `tailcompany_wp_proxy=debug`). |
 
 ```bash
 CACHE_TTL_MS=60000 PORT=8080 ./target/release/tailcompany-wp-proxy
 ```
 
+## Observability (Sentry)
+
+Sentry is enabled when `SENTRY_DSN` is set. The proxy loads a `.env` file at
+startup, so the usual setup is:
+
+```bash
+cp .env.example .env
+# edit .env and set SENTRY_DSN
+```
+
+Leave `SENTRY_DSN` empty to disable Sentry.
+
+What is captured:
+
+- **Errors** — `ERROR`-level `tracing` events become Sentry error events with
+  exception type and source chain. This covers upstream failures and connection
+  errors. Panics are captured by the `panic` integration. Error events carry the
+  request context (URL, method, query string, and safe headers) plus
+  `http.method` / `http.route` / `cache.source` tags. When the upstream returns
+  malformed JSON, a truncated copy of the response is attached to the event.
+- **Logs** — `INFO`-level and above `tracing` events are also sent as Sentry
+  structured logs (via `LogLayer`).
+- **Metrics** — counters, gauges, and distributions are captured for requests,
+  cache behavior, and upstream fetches: `http.requests`,
+  `http.request.duration`, `cache.requests`, `cache.products`,
+  `upstream.fetch.duration`, `upstream.products`, and `upstream.errors`.
+- **Tracing** — each HTTP request is a Sentry transaction (`http.server`, named
+  e.g. `GET /products`), and the upstream fetch is a child span. Spans carry
+  `http.response.status_code`, `cache.source`, and `upstream.url`. Incoming
+  `sentry-trace` headers are continued, and the trace is propagated to the
+  upstream request. Sampling is controlled by `SENTRY_TRACES_SAMPLE_RATE`
+  (default `1.0`); `/health` is never traced.
+- **Breadcrumbs** — `INFO`/`WARN` events, including cache lookups, are attached
+  as breadcrumbs to later errors.
+
+Release builds keep the symbol table (`strip = "debuginfo"`) so Sentry
+backtraces resolve to function names. Line numbers require debug info; upload
+debug files to Sentry (or build with `debug = 1` and no stripping) if you need
+them.
+
+The DSN is a public client key, not a server secret; it can be overridden per
+environment. Set `SENTRY_DEBUG=true` to see the transport's activity.
+
+## Docker
+
+The `Dockerfile` is a multi-stage build: `rust:1-slim-bookworm` compiles the
+binary, then it is copied into `gcr.io/distroless/cc-debian12:nonroot`. The
+runtime image has no shell or package manager, runs as UID 65532, and is about
+46 MB.
+
+```bash
+docker build -t tailcompany-wp-proxy .
+docker run --rm -p 3000:3000 --env-file .env tailcompany-wp-proxy
+```
+
+`.env` is not baked into the image; pass it at runtime with `--env-file` (or
+`-e SENTRY_DSN=...`).
+
 ## Layout
 
 | File | Role |
 | --- | --- |
-| `src/main.rs` | Reads config, builds the agent/app, binds and serves. |
+| `src/main.rs` | Reads config, initialises telemetry, builds the app, binds and serves. |
 | `src/config.rs` | Environment configuration. |
+| `src/telemetry.rs` | Sentry + `tracing` subscriber setup. |
 | `src/server.rs` | Hand-rolled HTTP/1.1 server (thread per connection), routing, JSON responses. |
 | `src/cache.rs` | TTL cache with request coalescing and stale-if-error fallback. |
 | `src/upstream.rs` | Fetches the Store API over HTTPS (ureq + rustls). |
@@ -104,9 +184,10 @@ CACHE_TTL_MS=60000 PORT=8080 ./target/release/tailcompany-wp-proxy
 
 ## Dependencies
 
-Kept deliberately small: `ureq` (blocking HTTP client with rustls), `serde` and
-`serde_json`. The HTTP server is written directly against `std::net`, so there is
-no async runtime.
+Kept deliberately small: `ureq` (blocking HTTP client with rustls), `serde`,
+`serde_json`, `sentry` (using its `ureq` transport, so no reqwest/tokio), and
+`tracing`/`tracing-subscriber`. The HTTP server is written directly against
+`std::net`, so there is no async runtime.
 
 ## Tests
 

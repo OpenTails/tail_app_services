@@ -120,15 +120,12 @@ impl ProductCache {
         }
     }
 
-    fn stale_or_err(
-        &self,
-        message: String,
-    ) -> Result<(Vec<Product>, CacheSource), UpstreamError> {
+    fn stale_or_err(&self, message: String) -> Result<(Vec<Product>, CacheSource), UpstreamError> {
         let state = self.state.lock().unwrap();
-        if let (Some(products), Some(fetched_at)) = (&state.products, state.fetched_at) {
-            if fetched_at.elapsed() < self.max_stale {
-                return Ok((products.clone(), CacheSource::Stale));
-            }
+        if let (Some(products), Some(fetched_at)) = (&state.products, state.fetched_at)
+            && fetched_at.elapsed() < self.max_stale
+        {
+            return Ok((products.clone(), CacheSource::Stale));
         }
         Err(UpstreamError(message))
     }
@@ -163,8 +160,8 @@ impl ProductCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     fn sample() -> Vec<Product> {
@@ -213,7 +210,9 @@ mod tests {
         cache.get_or_load(|| Ok(sample())).unwrap();
         thread::sleep(Duration::from_millis(40));
 
-        let stale = cache.get_or_load(|| Err(UpstreamError("down".to_string()))).unwrap();
+        let stale = cache
+            .get_or_load(|| Err(UpstreamError("down".to_string())))
+            .unwrap();
         assert_eq!(stale.1, CacheSource::Stale);
         assert_eq!(stale.0.len(), 1);
     }
@@ -221,9 +220,11 @@ mod tests {
     #[test]
     fn errors_when_there_is_nothing_to_fall_back_to() {
         let cache = ProductCache::new(Duration::from_secs(60), Duration::from_secs(60));
-        assert!(cache
-            .get_or_load(|| Err(UpstreamError("boom".to_string())))
-            .is_err());
+        assert!(
+            cache
+                .get_or_load(|| Err(UpstreamError("boom".to_string())))
+                .is_err()
+        );
     }
 
     #[test]
@@ -232,9 +233,11 @@ mod tests {
         cache.get_or_load(|| Ok(sample())).unwrap();
         thread::sleep(Duration::from_millis(60));
 
-        assert!(cache
-            .get_or_load(|| Err(UpstreamError("gone".to_string())))
-            .is_err());
+        assert!(
+            cache
+                .get_or_load(|| Err(UpstreamError("gone".to_string())))
+                .is_err()
+        );
     }
 
     #[test]

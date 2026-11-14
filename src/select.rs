@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn caps_k_at_the_number_of_products() {
         let products = vec![product(1, false), product(2, false)];
-        assert_eq!(select_products(&products, 10, &mut Rng::from_seed(1)).len(), 2);
+        assert_eq!(
+            select_products(&products, 10, &mut Rng::from_seed(1)).len(),
+            2
+        );
     }
 
     #[test]
