@@ -204,6 +204,9 @@ Twenty unit and integration tests cover normalization, on-sale-first selection,
 the cache (fresh hits, TTL refresh, coalescing, stale fallback), and the HTTP
 layer. The HTTP tests warm the cache up front, so they never touch the network.
 
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy`, and
+`cargo test` on every push and pull request.
+
 ## Static binary (optional)
 
 The default build links against the system C library. For a fully statically
@@ -221,3 +224,7 @@ cargo build --release --target x86_64-unknown-linux-musl
   directly. Tighten the headers in `src/server.rs` if you need to lock it down.
 - The cache is per-process and in-memory; running multiple instances means each
   keeps its own copy.
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).

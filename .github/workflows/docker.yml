@@ -61,5 +61,12 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: |
+            org.opencontainers.image.title=tailcompany-wp-proxy
+            org.opencontainers.image.description=Caching proxy for the Tail Company WooCommerce Store API
+            org.opencontainers.image.source=https://github.com/OpenTails/tail_app_services
+            org.opencontainers.image.url=https://github.com/OpenTails/tail_app_services
+            org.opencontainers.image.licenses=GPL-3.0-only
+            org.opencontainers.image.vendor=OpenTails
           cache-from: type=gha
           cache-to: type=gha,mode=max

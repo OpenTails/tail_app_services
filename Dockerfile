@@ -24,6 +24,13 @@ RUN touch src/main.rs && cargo build --release
 # Distroless: no shell, no package manager, just glibc/libgcc and the binary.
 FROM gcr.io/distroless/cc-debian12:nonroot
 
+LABEL org.opencontainers.image.title="tailcompany-wp-proxy" \
+      org.opencontainers.image.description="Caching proxy for the Tail Company WooCommerce Store API" \
+      org.opencontainers.image.source="https://github.com/OpenTails/tail_app_services" \
+      org.opencontainers.image.url="https://github.com/OpenTails/tail_app_services" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.vendor="OpenTails"
+
 COPY --from=builder /app/target/release/tailcompany-wp-proxy /usr/local/bin/tailcompany-wp-proxy
 
 EXPOSE 3000
