@@ -1,5 +1,6 @@
 mod cache;
 mod config;
+mod post;
 mod product;
 mod rng;
 mod select;
@@ -34,6 +35,7 @@ fn main() {
 
     let app = Arc::new(server::App {
         cache: cache::ProductCache::new(config.cache_ttl, config.cache_max_stale),
+        blog_cache: cache::PostCache::new(config.cache_ttl, config.cache_max_stale),
         agent,
         config: config.clone(),
     });

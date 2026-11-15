@@ -8,6 +8,7 @@ and reports errors and performance traces to Sentry.
 - Endpoint: `GET /products` → JSON array of 10 products (configurable)
 - On-sale products are always listed first
 - Only the fields needed by a storefront widget are exposed
+- Endpoint: `GET /blog` → JSON array of the 10 latest blog posts
 - Sentry error reporting + tracing, and a distroless Docker image
 
 ## Requirements
@@ -59,28 +60,56 @@ curl http://localhost:3000/products
 `refresh`, or `stale`. Other routes: `GET /` (self-description) and `GET /health`
 (liveness).
 
+```bash
+curl http://localhost:3000/blog
+```
+
+```json
+[
+  {
+    "id": 81281,
+    "name": "A day in the life..",
+    "date": "2026-10-29T08:41:24",
+    "url": "https://thetailcompany.com/2026/10/29/a-day-in-the-life/",
+    "thumbnail": "https://thetailcompany.com/wp-content/uploads/2026/10/custom-mitail-280x280.jpg"
+  }
+]
+```
+
+`GET /blog` reads the WordPress REST API (`wp/v2/posts`) and always returns the
+10 latest posts, newest first, as configured by `BLOG_UPSTREAM_URL`. Titles have
+their HTML entities decoded (e.g. `&#8217;` → `’`).
+
 ## How it works
 
 ```
 GET /products ──▶ TTL cache ──(miss)──▶ Store API ──▶ normalize ──▶ select ──▶ JSON
                      │(hit)
                      └────────────────────────────────────────────▶ select ──▶ JSON
+
+GET /blog ──────▶ TTL cache ──(miss)──▶ Posts API ──▶ normalize ────────────▶ JSON
+                     │(hit)
+                     └──────────────────────────────────────────────────────▶ JSON
 ```
 
 1. **Caching** (`src/cache.rs`) — the full upstream list is kept in memory for
    `CACHE_TTL_MS`. Concurrent misses are coalesced into a single upstream
    request, and if upstream fails the last good copy is served (up to
    `CACHE_MAX_STALE_MS`) instead of erroring.
-2. **Normalizing** (`src/product.rs`) — each product is projected down to
-   `id`, `name`, `on_sale`, `is_in_stock`, `permalink`, and the first image's
-   `thumbnail` (falling back to its full `src`, then `null`). Malformed entries
-   are skipped rather than failing the whole batch.
+2. **Normalizing** (`src/product.rs`, `src/post.rs`) — each product is projected
+   down to `id`, `name`, `on_sale`, `is_in_stock`, `permalink`, and the first
+   image's `thumbnail` (falling back to its full `src`, then `null`); each post
+   is projected down to `id`, `name` (with HTML entities decoded), `date`,
+   `url`, and the featured image's `thumbnail` size (falling back to `medium`,
+   `large`, `full`, then the full-size `source_url`). Malformed entries are
+   skipped rather than failing the whole batch.
 3. **Selecting** (`src/select.rs`) — products are split into on-sale and regular
    groups, each group is shuffled (Fisher-Yates), and the groups are concatenated
    on-sale first. The result is truncated to the requested count, so on-sale
    products always occupy the leading positions and regular products only make up
    the balance when there are not enough sale items. Results are unique and
-   freshly randomized per request.
+   freshly randomized per request. Blog posts keep the upstream order and are
+   served as-is (newest first).
 4. **Telemetry** (`src/telemetry.rs`) — Sentry is initialised at startup and a
    `tracing` subscriber fans events out to the console and to Sentry.
 
@@ -93,6 +122,7 @@ is loaded at startup; real environment variables take precedence.
 | --- | --- | --- |
 | `PORT` | `3000` | Listen port. The server binds `0.0.0.0`. |
 | `UPSTREAM_URL` | the Store API URL above | Override the source URL. |
+| `BLOG_UPSTREAM_URL` | the posts API URL above | Override the blog source URL (also controls how many posts are returned). |
 | `UPSTREAM_TIMEOUT_MS` | `10000` | Per-request upstream timeout. |
 | `CACHE_TTL_MS` | `300000` | How long a cached list stays fresh (5 min). |
 | `CACHE_MAX_STALE_MS` | `86400000` | How long an expired list may be served when upstream is down (24 h). |
@@ -134,8 +164,9 @@ What is captured:
   structured logs (via `LogLayer`).
 - **Metrics** — counters, gauges, and distributions are captured for requests,
   cache behavior, and upstream fetches: `http.requests`,
-  `http.request.duration`, `cache.requests`, `cache.products`,
-  `upstream.fetch.duration`, `upstream.products`, and `upstream.errors`.
+  `http.request.duration`, `cache.requests`, `cache.products`, `cache.posts`,
+  `upstream.fetch.duration`, `upstream.products`, `upstream.posts`, and
+  `upstream.errors`.
 - **Tracing** — each HTTP request is a Sentry transaction (`http.server`, named
   e.g. `GET /products`), and the upstream fetch is a child span. Spans carry
   `http.response.status_code`, `cache.source`, and `upstream.url`. Incoming
@@ -181,9 +212,10 @@ GitHub Actions, and Docker base images up to date.
 | `src/config.rs` | Environment configuration. |
 | `src/telemetry.rs` | Sentry + `tracing` subscriber setup. |
 | `src/server.rs` | Hand-rolled HTTP/1.1 server (thread per connection), routing, JSON responses. |
-| `src/cache.rs` | TTL cache with request coalescing and stale-if-error fallback. |
-| `src/upstream.rs` | Fetches the Store API over HTTPS (ureq + rustls). |
+| `src/cache.rs` | Generic TTL cache with request coalescing and stale-if-error fallback. |
+| `src/upstream.rs` | Fetches the Store and posts APIs over HTTPS (ureq + rustls). |
 | `src/product.rs` | Lenient normalization down to the six exposed fields. |
+| `src/post.rs` | Lenient normalization down to the five exposed post fields. |
 | `src/select.rs` | On-sale-first random selection (Fisher-Yates per group). |
 | `src/rng.rs` | Small SplitMix64 generator, so there is no `rand` dependency. |
 
@@ -200,9 +232,10 @@ Kept deliberately small: `ureq` (blocking HTTP client with rustls), `serde`,
 cargo test
 ```
 
-Twenty unit and integration tests cover normalization, on-sale-first selection,
-the cache (fresh hits, TTL refresh, coalescing, stale fallback), and the HTTP
-layer. The HTTP tests warm the cache up front, so they never touch the network.
+Twenty-eight unit and integration tests cover product and post normalization,
+on-sale-first selection, the cache (fresh hits, TTL refresh, coalescing, stale
+fallback), and the HTTP layer. The HTTP tests warm the cache up front, so they
+never touch the network.
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy`, and
 `cargo test` on every push and pull request.

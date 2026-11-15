@@ -6,15 +6,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::cache::ProductCache;
+use crate::cache::{PostCache, ProductCache};
 use crate::config::Config;
 use crate::rng::Rng;
 use crate::select::select_products;
-use crate::upstream::fetch_products;
+use crate::upstream::{fetch_posts, fetch_products};
 
 /// Shared state for every request.
 pub struct App {
     pub cache: ProductCache,
+    pub blog_cache: PostCache,
     pub agent: ureq::Agent,
     pub config: Config,
 }
@@ -124,6 +125,7 @@ fn route(app: &App, request: &Request) -> Response {
                 "name": "tailcompany-wp-proxy",
                 "endpoints": {
                     "GET /products": "Random products from the Store API, with on-sale items first.",
+                    "GET /blog": "The 10 latest blog posts.",
                     "GET /health": "Liveness check.",
                 },
                 "query": {
@@ -136,6 +138,7 @@ fn route(app: &App, request: &Request) -> Response {
             }),
         ),
         "/products" => products(app, query),
+        "/blog" => posts(app),
         _ => Response::error(404, "not_found"),
     }
 }
@@ -163,6 +166,7 @@ fn products(app: &App, query: &str) -> Response {
 
             sentry::metrics::counter("cache.requests", 1.0)
                 .attribute("cache.source", source.as_str())
+                .attribute("http.route", "/products")
                 .capture();
             sentry::metrics::gauge("cache.products", products.len() as f64).capture();
 
@@ -171,6 +175,40 @@ fn products(app: &App, query: &str) -> Response {
                 status: 200,
                 x_cache: Some(source.as_str()),
                 body: Some(json!(selection)),
+            }
+        }
+        Err(err) => {
+            let error: &dyn std::error::Error = &err;
+            tracing::error!(error, "upstream request failed");
+            Response::json(502, json!({ "error": "upstream_unavailable" }))
+        }
+    }
+}
+
+fn posts(app: &App) -> Response {
+    match app
+        .blog_cache
+        .get_or_load(|| fetch_posts(&app.agent, &app.config))
+    {
+        Ok((posts, source)) => {
+            tracing::Span::current().record("cache.source", source.as_str());
+            sentry::configure_scope(|scope| scope.set_tag("cache.source", source.as_str()));
+            tracing::info!(
+                cache.source = source.as_str(),
+                cache.posts = posts.len(),
+                "cache lookup"
+            );
+
+            sentry::metrics::counter("cache.requests", 1.0)
+                .attribute("cache.source", source.as_str())
+                .attribute("http.route", "/blog")
+                .capture();
+            sentry::metrics::gauge("cache.posts", posts.len() as f64).capture();
+
+            Response {
+                status: 200,
+                x_cache: Some(source.as_str()),
+                body: Some(json!(posts)),
             }
         }
         Err(err) => {
@@ -347,6 +385,7 @@ mod tests {
         Config {
             port: 0,
             upstream_url: "http://unused.invalid".to_string(),
+            blog_upstream_url: "http://unused.invalid".to_string(),
             upstream_timeout: Duration::from_secs(1),
             cache_ttl: Duration::from_secs(3600),
             cache_max_stale: Duration::from_secs(3600),
@@ -377,8 +416,21 @@ mod tests {
             .collect();
         cache.get_or_load(|| Ok(products)).unwrap();
 
+        let blog_cache = PostCache::new(config.cache_ttl, config.cache_max_stale);
+        let posts: Vec<crate::post::Post> = (1..=10)
+            .map(|id| crate::post::Post {
+                id,
+                name: format!("Post {id}"),
+                date: format!("2026-01-{id:02}T00:00:00"),
+                url: format!("https://example.test/2026/01/post-{id}/"),
+                thumbnail: Some(format!("https://example.test/post-{id}.jpg")),
+            })
+            .collect();
+        blog_cache.get_or_load(|| Ok(posts)).unwrap();
+
         Arc::new(App {
             cache,
+            blog_cache,
             agent: ureq::Agent::new_with_defaults(),
             config,
         })
@@ -475,6 +527,28 @@ mod tests {
             Err(err) => panic!("{err}"),
         };
         assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn blog_returns_ten_posts_with_only_the_exposed_fields() {
+        let base = spawn(test_config());
+        let (status, cache, body) = get(&format!("{base}/blog"));
+
+        assert_eq!(status, 200);
+        assert_eq!(cache.as_deref(), Some("cache"));
+
+        let items: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(items.len(), 10);
+        for item in &items {
+            let mut keys: Vec<&str> = item
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, vec!["date", "id", "name", "thumbnail", "url"]);
+        }
     }
 
     #[test]

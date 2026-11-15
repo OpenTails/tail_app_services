@@ -1,6 +1,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::post::Post;
 use crate::product::Product;
 use crate::upstream::UpstreamError;
 
@@ -26,35 +27,49 @@ impl CacheSource {
 
 /// A one-shot load shared by every request that missed the cache at the same
 /// time, so the upstream is only hit once per refresh.
-#[derive(Default)]
-struct Inflight {
-    result: Mutex<Option<Result<Vec<Product>, String>>>,
+struct Inflight<T> {
+    result: Mutex<Option<Result<Vec<T>, String>>>,
     ready: Condvar,
 }
 
-struct State {
-    products: Option<Vec<Product>>,
-    fetched_at: Option<Instant>,
-    inflight: Option<Arc<Inflight>>,
+impl<T> Default for Inflight<T> {
+    fn default() -> Self {
+        Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
 }
 
-/// A TTL cache for the upstream product list.
+struct State<T> {
+    items: Option<Vec<T>>,
+    fetched_at: Option<Instant>,
+    inflight: Option<Arc<Inflight<T>>>,
+}
+
+/// A TTL cache for one kind of upstream list.
 ///
 /// - Fresh entries are served without calling the loader.
 /// - Concurrent misses are coalesced into a single loader call.
 /// - If the loader fails, the last good list is served while it is younger
 ///   than `max_stale`.
-pub struct ProductCache {
-    state: Mutex<State>,
+pub struct Cache<T> {
+    state: Mutex<State<T>>,
     ttl: Duration,
     max_stale: Duration,
 }
 
-impl ProductCache {
+/// The cache holding the upstream product list.
+pub type ProductCache = Cache<Product>;
+
+/// The cache holding the upstream blog post list.
+pub type PostCache = Cache<Post>;
+
+impl<T: Clone> Cache<T> {
     pub fn new(ttl: Duration, max_stale: Duration) -> Self {
         Self {
             state: Mutex::new(State {
-                products: None,
+                items: None,
                 fetched_at: None,
                 inflight: None,
             }),
@@ -63,9 +78,9 @@ impl ProductCache {
         }
     }
 
-    pub fn get_or_load<F>(&self, loader: F) -> Result<(Vec<Product>, CacheSource), UpstreamError>
+    pub fn get_or_load<F>(&self, loader: F) -> Result<(Vec<T>, CacheSource), UpstreamError>
     where
-        F: FnOnce() -> Result<Vec<Product>, UpstreamError>,
+        F: FnOnce() -> Result<Vec<T>, UpstreamError>,
     {
         let mut state = self.state.lock().unwrap();
 
@@ -80,7 +95,7 @@ impl ProductCache {
             return self.finish(result);
         }
 
-        let had_entry = state.products.is_some();
+        let had_entry = state.items.is_some();
         let inflight = Arc::new(Inflight::default());
         state.inflight = Some(Arc::clone(&inflight));
         drop(state);
@@ -90,8 +105,8 @@ impl ProductCache {
         {
             let mut state = self.state.lock().unwrap();
             state.inflight = None;
-            if let Ok(products) = &result {
-                state.products = Some(products.clone());
+            if let Ok(items) = &result {
+                state.items = Some(items.clone());
                 state.fetched_at = Some(Instant::now());
             }
         }
@@ -99,8 +114,8 @@ impl ProductCache {
         Self::publish(&inflight, result.clone());
 
         match result {
-            Ok(products) => Ok((
-                products,
+            Ok(items) => Ok((
+                items,
                 if had_entry {
                     CacheSource::Refresh
                 } else {
@@ -111,37 +126,37 @@ impl ProductCache {
         }
     }
 
-    fn fresh(&self, state: &State) -> Option<Vec<Product>> {
-        match (&state.products, state.fetched_at) {
-            (Some(products), Some(fetched_at)) if fetched_at.elapsed() < self.ttl => {
-                Some(products.clone())
+    fn fresh(&self, state: &State<T>) -> Option<Vec<T>> {
+        match (&state.items, state.fetched_at) {
+            (Some(items), Some(fetched_at)) if fetched_at.elapsed() < self.ttl => {
+                Some(items.clone())
             }
             _ => None,
         }
     }
 
-    fn stale_or_err(&self, message: String) -> Result<(Vec<Product>, CacheSource), UpstreamError> {
+    fn stale_or_err(&self, message: String) -> Result<(Vec<T>, CacheSource), UpstreamError> {
         let state = self.state.lock().unwrap();
-        if let (Some(products), Some(fetched_at)) = (&state.products, state.fetched_at)
+        if let (Some(items), Some(fetched_at)) = (&state.items, state.fetched_at)
             && fetched_at.elapsed() < self.max_stale
         {
-            return Ok((products.clone(), CacheSource::Stale));
+            return Ok((items.clone(), CacheSource::Stale));
         }
         Err(UpstreamError(message))
     }
 
     fn finish(
         &self,
-        result: Result<Vec<Product>, String>,
-    ) -> Result<(Vec<Product>, CacheSource), UpstreamError> {
+        result: Result<Vec<T>, String>,
+    ) -> Result<(Vec<T>, CacheSource), UpstreamError> {
         match result {
             // The shared load refreshed the cache, so it is fresh now.
-            Ok(products) => Ok((products, CacheSource::Cache)),
+            Ok(items) => Ok((items, CacheSource::Cache)),
             Err(message) => self.stale_or_err(message),
         }
     }
 
-    fn wait(inflight: &Inflight) -> Result<Vec<Product>, String> {
+    fn wait(inflight: &Inflight<T>) -> Result<Vec<T>, String> {
         let mut guard = inflight.result.lock().unwrap();
         while guard.is_none() {
             guard = inflight.ready.wait(guard).unwrap();
@@ -149,7 +164,7 @@ impl ProductCache {
         guard.clone().expect("inflight result is set before notify")
     }
 
-    fn publish(inflight: &Inflight, result: Result<Vec<Product>, String>) {
+    fn publish(inflight: &Inflight<T>, result: Result<Vec<T>, String>) {
         let mut guard = inflight.result.lock().unwrap();
         *guard = Some(result);
         drop(guard);
