@@ -50,6 +50,7 @@ mod tests {
             is_in_stock: true,
             permalink: format!("https://example.test/product/{id}/"),
             thumbnail: None,
+            thumbhash: None,
         }
     }
 

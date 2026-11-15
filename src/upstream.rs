@@ -4,6 +4,7 @@ use std::time::Instant;
 use crate::config::Config;
 use crate::post::{Post, parse_posts};
 use crate::product::{Product, parse_products};
+use crate::thumb::ThumbhashCache;
 
 /// Any failure while reading from the WooCommerce Store API.
 #[derive(Debug)]
@@ -19,13 +20,17 @@ impl std::error::Error for UpstreamError {}
 
 /// Fetch and normalize the upstream product list.
 #[tracing::instrument(
-    skip(agent, config),
+    skip(agent, config, thumbhashes),
     name = "upstream.fetch",
     fields(upstream.url = %config.upstream_url)
 )]
-pub fn fetch_products(agent: &ureq::Agent, config: &Config) -> Result<Vec<Product>, UpstreamError> {
+pub fn fetch_products(
+    agent: &ureq::Agent,
+    config: &Config,
+    thumbhashes: &ThumbhashCache,
+) -> Result<Vec<Product>, UpstreamError> {
     let started = Instant::now();
-    let result = fetch_products_inner(agent, config);
+    let result = fetch_products_inner(agent, config, thumbhashes);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     sentry::metrics::distribution("upstream.fetch.duration", elapsed_ms)
@@ -47,11 +52,21 @@ pub fn fetch_products(agent: &ureq::Agent, config: &Config) -> Result<Vec<Produc
 fn fetch_products_inner(
     agent: &ureq::Agent,
     config: &Config,
+    thumbhashes: &ThumbhashCache,
 ) -> Result<Vec<Product>, UpstreamError> {
     let text = fetch_text(agent, &config.upstream_url)?;
 
     match parse_products(&text) {
-        Ok(products) => Ok(products),
+        Ok(mut products) => {
+            if config.thumbhash_enabled {
+                let urls: Vec<Option<String>> =
+                    products.iter().map(|p| p.thumbnail.clone()).collect();
+                for (product, hash) in products.iter_mut().zip(thumbhashes.resolve(agent, &urls)) {
+                    product.thumbhash = hash;
+                }
+            }
+            Ok(products)
+        }
         Err(err) => {
             attach_upstream_body(&text);
             Err(UpstreamError(format!(
@@ -63,13 +78,17 @@ fn fetch_products_inner(
 
 /// Fetch and normalize the upstream blog post list.
 #[tracing::instrument(
-    skip(agent, config),
+    skip(agent, config, thumbhashes),
     name = "upstream.fetch",
     fields(upstream.url = %config.blog_upstream_url)
 )]
-pub fn fetch_posts(agent: &ureq::Agent, config: &Config) -> Result<Vec<Post>, UpstreamError> {
+pub fn fetch_posts(
+    agent: &ureq::Agent,
+    config: &Config,
+    thumbhashes: &ThumbhashCache,
+) -> Result<Vec<Post>, UpstreamError> {
     let started = Instant::now();
-    let result = fetch_posts_inner(agent, config);
+    let result = fetch_posts_inner(agent, config, thumbhashes);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     sentry::metrics::distribution("upstream.fetch.duration", elapsed_ms)
@@ -88,11 +107,23 @@ pub fn fetch_posts(agent: &ureq::Agent, config: &Config) -> Result<Vec<Post>, Up
     result
 }
 
-fn fetch_posts_inner(agent: &ureq::Agent, config: &Config) -> Result<Vec<Post>, UpstreamError> {
+fn fetch_posts_inner(
+    agent: &ureq::Agent,
+    config: &Config,
+    thumbhashes: &ThumbhashCache,
+) -> Result<Vec<Post>, UpstreamError> {
     let text = fetch_text(agent, &config.blog_upstream_url)?;
 
     match parse_posts(&text) {
-        Ok(posts) => Ok(posts),
+        Ok(mut posts) => {
+            if config.thumbhash_enabled {
+                let urls: Vec<Option<String>> = posts.iter().map(|p| p.thumbnail.clone()).collect();
+                for (post, hash) in posts.iter_mut().zip(thumbhashes.resolve(agent, &urls)) {
+                    post.thumbhash = hash;
+                }
+            }
+            Ok(posts)
+        }
         Err(err) => {
             attach_upstream_body(&text);
             Err(UpstreamError(format!(

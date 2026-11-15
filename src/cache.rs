@@ -187,6 +187,7 @@ mod tests {
             is_in_stock: true,
             permalink: "p".to_string(),
             thumbnail: None,
+            thumbhash: None,
         }]
     }
 

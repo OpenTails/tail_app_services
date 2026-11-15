@@ -9,6 +9,7 @@ pub struct Post {
     pub date: String,
     pub url: String,
     pub thumbnail: Option<String>,
+    pub thumbhash: Option<String>,
 }
 
 /// Parse the WordPress REST API posts response into `Post`s.
@@ -47,6 +48,7 @@ fn normalize(value: Value) -> Option<Post> {
         date,
         url,
         thumbnail: featured_thumbnail(&value),
+        thumbhash: None,
     })
 }
 
@@ -227,6 +229,7 @@ mod tests {
                 date: "2026-01-02T03:04:05".to_string(),
                 url: "https://example.test/2026/01/hello/".to_string(),
                 thumbnail: Some("thumb.jpg".to_string()),
+                thumbhash: None,
             }]
         );
     }

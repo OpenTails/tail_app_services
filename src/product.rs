@@ -10,6 +10,7 @@ pub struct Product {
     pub is_in_stock: bool,
     pub permalink: String,
     pub thumbnail: Option<String>,
+    pub thumbhash: Option<String>,
 }
 
 /// Parse the WooCommerce Store API response into `Product`s.
@@ -59,6 +60,7 @@ fn normalize(value: Value) -> Option<Product> {
         is_in_stock,
         permalink,
         thumbnail,
+        thumbhash: None,
     })
 }
 
@@ -91,6 +93,7 @@ mod tests {
                 is_in_stock: true,
                 permalink: "https://example.test/product/tail/".to_string(),
                 thumbnail: Some("thumb.jpg".to_string()),
+                thumbhash: None,
             }]
         );
     }

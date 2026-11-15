@@ -15,6 +15,7 @@ pub struct Config {
     pub upstream_timeout: Duration,
     pub cache_ttl: Duration,
     pub cache_max_stale: Duration,
+    pub thumbhash_enabled: bool,
     pub default_count: usize,
     pub max_count: usize,
     pub sentry_dsn: Option<String>,
@@ -50,6 +51,7 @@ impl Config {
                 0,
                 u64::MAX,
             )?),
+            thumbhash_enabled: parse_bool("THUMBHASH_ENABLED", true)?,
             default_count: parse_u64("DEFAULT_COUNT", 10, 1, u64::MAX)? as usize,
             max_count: parse_u64("MAX_COUNT", 100, 1, u64::MAX)? as usize,
             sentry_dsn: env::var("SENTRY_DSN")

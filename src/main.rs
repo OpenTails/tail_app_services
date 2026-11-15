@@ -6,6 +6,7 @@ mod rng;
 mod select;
 mod server;
 mod telemetry;
+mod thumb;
 mod upstream;
 
 use std::net::TcpListener;
@@ -36,6 +37,7 @@ fn main() {
     let app = Arc::new(server::App {
         cache: cache::ProductCache::new(config.cache_ttl, config.cache_max_stale),
         blog_cache: cache::PostCache::new(config.cache_ttl, config.cache_max_stale),
+        thumbhashes: thumb::ThumbhashCache::new(),
         agent,
         config: config.clone(),
     });
@@ -59,6 +61,7 @@ fn main() {
         upstream = %config.upstream_url,
         cache_ttl_ms = config.cache_ttl.as_millis() as u64,
         cache_max_stale_ms = config.cache_max_stale.as_millis() as u64,
+        thumbhash_enabled = config.thumbhash_enabled,
         default_count = config.default_count,
         "tailcompany-wp-proxy listening"
     );

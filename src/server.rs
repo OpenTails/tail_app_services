@@ -10,12 +10,14 @@ use crate::cache::{PostCache, ProductCache};
 use crate::config::Config;
 use crate::rng::Rng;
 use crate::select::select_products;
+use crate::thumb::ThumbhashCache;
 use crate::upstream::{fetch_posts, fetch_products};
 
 /// Shared state for every request.
 pub struct App {
     pub cache: ProductCache,
     pub blog_cache: PostCache,
+    pub thumbhashes: ThumbhashCache,
     pub agent: ureq::Agent,
     pub config: Config,
 }
@@ -153,7 +155,7 @@ fn products(app: &App, query: &str) -> Response {
 
     match app
         .cache
-        .get_or_load(|| fetch_products(&app.agent, &app.config))
+        .get_or_load(|| fetch_products(&app.agent, &app.config, &app.thumbhashes))
     {
         Ok((products, source)) => {
             tracing::Span::current().record("cache.source", source.as_str());
@@ -188,7 +190,7 @@ fn products(app: &App, query: &str) -> Response {
 fn posts(app: &App) -> Response {
     match app
         .blog_cache
-        .get_or_load(|| fetch_posts(&app.agent, &app.config))
+        .get_or_load(|| fetch_posts(&app.agent, &app.config, &app.thumbhashes))
     {
         Ok((posts, source)) => {
             tracing::Span::current().record("cache.source", source.as_str());
@@ -389,6 +391,7 @@ mod tests {
             upstream_timeout: Duration::from_secs(1),
             cache_ttl: Duration::from_secs(3600),
             cache_max_stale: Duration::from_secs(3600),
+            thumbhash_enabled: false,
             default_count: 10,
             max_count: 100,
             sentry_dsn: None,
@@ -412,6 +415,7 @@ mod tests {
                 is_in_stock: true,
                 permalink: format!("https://example.test/product/{id}/"),
                 thumbnail: Some(format!("https://example.test/{id}.jpg")),
+                thumbhash: None,
             })
             .collect();
         cache.get_or_load(|| Ok(products)).unwrap();
@@ -424,6 +428,7 @@ mod tests {
                 date: format!("2026-01-{id:02}T00:00:00"),
                 url: format!("https://example.test/2026/01/post-{id}/"),
                 thumbnail: Some(format!("https://example.test/post-{id}.jpg")),
+                thumbhash: None,
             })
             .collect();
         blog_cache.get_or_load(|| Ok(posts)).unwrap();
@@ -431,6 +436,7 @@ mod tests {
         Arc::new(App {
             cache,
             blog_cache,
+            thumbhashes: ThumbhashCache::new(),
             agent: ureq::Agent::new_with_defaults(),
             config,
         })
@@ -484,6 +490,7 @@ mod tests {
                     "name",
                     "on_sale",
                     "permalink",
+                    "thumbhash",
                     "thumbnail"
                 ]
             );
@@ -547,7 +554,10 @@ mod tests {
                 .map(String::as_str)
                 .collect();
             keys.sort_unstable();
-            assert_eq!(keys, vec!["date", "id", "name", "thumbnail", "url"]);
+            assert_eq!(
+                keys,
+                vec!["date", "id", "name", "thumbhash", "thumbnail", "url"]
+            );
         }
     }
 
