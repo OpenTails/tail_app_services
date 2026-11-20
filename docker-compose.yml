@@ -1,0 +1,45 @@
+# Single-service stack for the Tail Company WP proxy.
+#
+# Quick start:
+#   cp .env.example .env      # optional: set SENTRY_DSN and any overrides
+#   docker compose up --build
+#   curl http://localhost:3000/products
+#
+# Every setting below is optional. Compose reads a `.env` file in this directory
+# automatically and interpolates the values here; anything left unset is passed
+# through empty, and the proxy falls back to its built-in defaults.
+#
+# There is no container healthcheck: the runtime image is distroless (no shell
+# or HTTP client to run one). Probe the /health endpoint from outside instead.
+
+services:
+  proxy:
+    build: .
+    image: tailcompany-wp-proxy
+    restart: unless-stopped
+    # Host and container ports both follow PORT, so an override stays in sync.
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    environment:
+      PORT: "${PORT:-3000}"
+      # Upstreams
+      UPSTREAM_URL: "${UPSTREAM_URL:-}"
+      SALE_ITEMS_URL: "${SALE_ITEMS_URL:-}"
+      BLOG_UPSTREAM_URL: "${BLOG_UPSTREAM_URL:-}"
+      UPSTREAM_TIMEOUT_MS: "${UPSTREAM_TIMEOUT_MS:-}"
+      # Cache
+      CACHE_TTL_MS: "${CACHE_TTL_MS:-}"
+      CACHE_MAX_STALE_MS: "${CACHE_MAX_STALE_MS:-}"
+      THUMBHASH_ENABLED: "${THUMBHASH_ENABLED:-}"
+      # Selection
+      DEFAULT_COUNT: "${DEFAULT_COUNT:-}"
+      MAX_COUNT: "${MAX_COUNT:-}"
+      # Sentry
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-}"
+      SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
+      SENTRY_SAMPLE_RATE: "${SENTRY_SAMPLE_RATE:-}"
+      SENTRY_TRACES_SAMPLE_RATE: "${SENTRY_TRACES_SAMPLE_RATE:-}"
+      SENTRY_DEBUG: "${SENTRY_DEBUG:-}"
+      # Logging
+      RUST_LOG: "${RUST_LOG:-}"

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -11,6 +13,16 @@ pub struct Product {
     pub permalink: String,
     pub thumbnail: Option<String>,
     pub thumbhash: Option<String>,
+}
+
+/// Mark the products whose id appears in `sale_ids` as on sale.
+///
+/// The Store API's own `on_sale` flag is ignored; the `tailco/v1/sale-items`
+/// endpoint is the source of truth for which products are discounted.
+pub fn apply_sale_items(products: &mut [Product], sale_ids: &HashSet<u64>) {
+    for product in products {
+        product.on_sale = sale_ids.contains(&product.id);
+    }
 }
 
 /// Parse the WooCommerce Store API response into `Product`s.
@@ -27,10 +39,6 @@ fn normalize(value: Value) -> Option<Product> {
     let id = value.get("id")?.as_u64()?;
     let name = value.get("name")?.as_str()?.to_string();
 
-    let on_sale = value
-        .get("on_sale")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let is_in_stock = value
         .get("is_in_stock")
         .and_then(Value::as_bool)
@@ -56,7 +64,8 @@ fn normalize(value: Value) -> Option<Product> {
     Some(Product {
         id,
         name,
-        on_sale,
+        // Filled in later from the sale-items endpoint.
+        on_sale: false,
         is_in_stock,
         permalink,
         thumbnail,
@@ -89,13 +98,27 @@ mod tests {
             vec![Product {
                 id: 42,
                 name: "Tail".to_string(),
-                on_sale: true,
+                // The upstream `on_sale` flag is ignored; sale items are
+                // applied separately.
+                on_sale: false,
                 is_in_stock: true,
                 permalink: "https://example.test/product/tail/".to_string(),
                 thumbnail: Some("thumb.jpg".to_string()),
                 thumbhash: None,
             }]
         );
+    }
+
+    #[test]
+    fn applies_sale_items_by_product_id() {
+        let mut products =
+            parse_products(r#"[{"id":1,"name":"A"},{"id":2,"name":"B"},{"id":3,"name":"C"}]"#)
+                .unwrap();
+
+        apply_sale_items(&mut products, &HashSet::from([1, 3]));
+
+        let flags: Vec<bool> = products.iter().map(|p| p.on_sale).collect();
+        assert_eq!(flags, vec![true, false, true]);
     }
 
     #[test]

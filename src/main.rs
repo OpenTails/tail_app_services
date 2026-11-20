@@ -3,6 +3,7 @@ mod config;
 mod post;
 mod product;
 mod rng;
+mod sale;
 mod select;
 mod server;
 mod telemetry;

@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::time::Instant;
 
 use crate::config::Config;
 use crate::post::{Post, parse_posts};
-use crate::product::{Product, parse_products};
+use crate::product::{Product, apply_sale_items, parse_products};
+use crate::sale::parse_sale_items;
 use crate::thumb::ThumbhashCache;
 
 /// Any failure while reading from the WooCommerce Store API.
@@ -58,6 +60,7 @@ fn fetch_products_inner(
 
     match parse_products(&text) {
         Ok(mut products) => {
+            apply_sale_items(&mut products, &fetch_sale_ids(agent, config));
             if config.thumbhash_enabled {
                 let urls: Vec<Option<String>> =
                     products.iter().map(|p| p.thumbnail.clone()).collect();
@@ -72,6 +75,38 @@ fn fetch_products_inner(
             Err(UpstreamError(format!(
                 "upstream returned invalid JSON: {err}"
             )))
+        }
+    }
+}
+
+/// Fetch the ids of the products that are on sale.
+///
+/// A failure here degrades to an empty set rather than failing the product
+/// list: showing products without a sale badge is better than showing none, and
+/// the error is logged and reported to Sentry.
+fn fetch_sale_ids(agent: &ureq::Agent, config: &Config) -> HashSet<u64> {
+    let text = match fetch_text(agent, &config.sale_items_url) {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                url = %config.sale_items_url,
+                "sale-items fetch failed; treating no products as on sale"
+            );
+            return HashSet::new();
+        }
+    };
+
+    match parse_sale_items(&text) {
+        Ok(ids) => ids,
+        Err(err) => {
+            attach_upstream_body(&text);
+            tracing::error!(
+                error = %err,
+                url = %config.sale_items_url,
+                "sale-items returned invalid JSON; treating no products as on sale"
+            );
+            HashSet::new()
         }
     }
 }

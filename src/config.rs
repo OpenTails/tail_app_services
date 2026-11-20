@@ -4,6 +4,8 @@ use std::time::Duration;
 pub const DEFAULT_UPSTREAM_URL: &str =
     "https://thetailcompany.com/wp-json/wc/store/v1/products?tag=select&per_page=100";
 
+pub const DEFAULT_SALE_ITEMS_URL: &str = "https://thetailcompany.com/wp-json/tailco/v1/sale-items";
+
 pub const DEFAULT_BLOG_UPSTREAM_URL: &str = "https://thetailcompany.com/wp-json/wp/v2/posts?per_page=10&orderby=date&order=desc&_embed=wp:featuredmedia";
 
 /// Runtime configuration, read from the environment.
@@ -11,6 +13,7 @@ pub const DEFAULT_BLOG_UPSTREAM_URL: &str = "https://thetailcompany.com/wp-json/
 pub struct Config {
     pub port: u16,
     pub upstream_url: String,
+    pub sale_items_url: String,
     pub blog_upstream_url: String,
     pub upstream_timeout: Duration,
     pub cache_ttl: Duration,
@@ -34,6 +37,10 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| DEFAULT_UPSTREAM_URL.to_string()),
+            sale_items_url: env::var("SALE_ITEMS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_SALE_ITEMS_URL.to_string()),
             blog_upstream_url: env::var("BLOG_UPSTREAM_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty())

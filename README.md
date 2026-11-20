@@ -5,6 +5,7 @@ compiles to a single self-contained binary, caches the upstream list in memory,
 and reports errors and performance traces to Sentry.
 
 - Upstream: `https://thetailcompany.com/wp-json/wc/store/v1/products?tag=select&per_page=100`
+- Sale feed: `https://thetailcompany.com/wp-json/tailco/v1/sale-items`
 - Endpoint: `GET /products` → JSON array of 10 products (configurable)
 - On-sale products are always listed first
 - Endpoint: `GET /blog` → JSON array of the 10 latest blog posts
@@ -92,7 +93,9 @@ cost this adds to a cache refresh.
 ## How it works
 
 ```
-GET /products ──▶ TTL cache ──(miss)──▶ Store API ──▶ normalize ──▶ select ──▶ JSON
+GET /products ──▶ TTL cache ──(miss)──▶ Store API ─┐
+                     │                             ├─▶ mark on-sale ──▶ select ──▶ JSON
+                     │                 sale-items ─┘
                      │(hit)
                      └────────────────────────────────────────────▶ select ──▶ JSON
 
@@ -111,7 +114,11 @@ GET /blog ──────▶ TTL cache ──(miss)──▶ Posts API ──
    is projected down to `id`, `name` (with HTML entities decoded), `date`,
    `url`, and the featured image's `thumbnail` size (falling back to `medium`,
    `large`, `full`, then the full-size `source_url`). Malformed entries are
-   skipped rather than failing the whole batch.
+   skipped rather than failing the whole batch. Each product is then marked
+   `on_sale` by matching its id against the `tailco/v1/sale-items` endpoint
+   (`src/sale.rs`); the Store API's own `on_sale` field is ignored. A failure of
+   the sale feed is logged but does not fail the product list — products are
+   served without a sale badge instead.
 3. **ThumbHashing** (`src/thumb.rs`) — each item's image is fetched, decoded
    (JPEG/PNG/WebP/GIF), downscaled to fit 100×100, and encoded as a ThumbHash,
    then base64-encoded into the `thumbhash` field. Images are fetched a few at a
@@ -156,6 +163,7 @@ is loaded at startup; real environment variables take precedence.
 | --- | --- | --- |
 | `PORT` | `3000` | Listen port. The server binds `0.0.0.0`. |
 | `UPSTREAM_URL` | the Store API URL above | Override the source URL. |
+| `SALE_ITEMS_URL` | the sale-items URL above | Override the sale-items source URL that decides which products are on sale. |
 | `BLOG_UPSTREAM_URL` | the posts API URL above | Override the blog source URL (also controls how many posts are returned). |
 | `UPSTREAM_TIMEOUT_MS` | `10000` | Per-request upstream timeout. |
 | `CACHE_TTL_MS` | `300000` | How long a cached list stays fresh (5 min). |
@@ -235,6 +243,18 @@ docker run --rm -p 3000:3000 --env-file .env tailcompany-wp-proxy
 `.env` is not baked into the image; pass it at runtime with `--env-file` (or
 `-e SENTRY_DSN=...`).
 
+Or run it with Compose (`docker-compose.yml`, a single `proxy` service):
+
+```bash
+cp .env.example .env        # optional; set SENTRY_DSN and any overrides
+docker compose up --build
+```
+
+Compose reads `.env` automatically and forwards the proxy's settings to the
+container; `PORT` drives both the published and the container port. The
+distroless runtime has no shell or HTTP client, so there is no container
+healthcheck — probe `GET /health` from outside.
+
 CI (`.github/workflows/docker.yml`) builds the image on every push and pull
 request, and publishes it to `ghcr.io/opentails/tail_app_services` on pushes to
 `master` and `v*` tags. Dependabot (`.github/dependabot.yml`) keeps Cargo,
@@ -249,8 +269,9 @@ GitHub Actions, and Docker base images up to date.
 | `src/telemetry.rs` | Sentry + `tracing` subscriber setup. |
 | `src/server.rs` | Hand-rolled HTTP/1.1 server (thread per connection), routing, JSON responses. |
 | `src/cache.rs` | Generic TTL cache with request coalescing and stale-if-error fallback. |
-| `src/upstream.rs` | Fetches the Store and posts APIs over HTTPS (ureq + rustls). |
-| `src/product.rs` | Lenient normalization down to the seven exposed fields. |
+| `src/upstream.rs` | Fetches the Store, sale-items, and posts APIs over HTTPS (ureq + rustls). |
+| `src/product.rs` | Lenient normalization down to the seven exposed fields, marking on-sale ids. |
+| `src/sale.rs` | Parses the sale-items endpoint into the set of on-sale product ids. |
 | `src/post.rs` | Lenient normalization down to the six exposed post fields. |
 | `src/thumb.rs` | Downloads, downscales, and ThumbHashes images, memoized by URL. |
 | `src/select.rs` | On-sale-first random selection (Fisher-Yates per group). |
@@ -271,10 +292,10 @@ was already present via `ureq`. The HTTP server is written directly against
 cargo test
 ```
 
-Thirty-four unit and integration tests cover product and post normalization,
-ThumbHash encoding and reuse, on-sale-first selection, the cache (fresh hits, TTL
-refresh, coalescing, stale fallback), and the HTTP layer. The HTTP tests warm the
-cache up front, so they never touch the network.
+Thirty-eight unit and integration tests cover product, sale-item, and post
+normalization, ThumbHash encoding and reuse, on-sale-first selection, the cache
+(fresh hits, TTL refresh, coalescing, stale fallback), and the HTTP layer. The
+HTTP tests warm the cache up front, so they never touch the network.
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `cargo clippy`, and
 `cargo test` on every push and pull request.

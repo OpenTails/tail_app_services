@@ -387,6 +387,7 @@ mod tests {
         Config {
             port: 0,
             upstream_url: "http://unused.invalid".to_string(),
+            sale_items_url: "http://unused.invalid".to_string(),
             blog_upstream_url: "http://unused.invalid".to_string(),
             upstream_timeout: Duration::from_secs(1),
             cache_ttl: Duration::from_secs(3600),
